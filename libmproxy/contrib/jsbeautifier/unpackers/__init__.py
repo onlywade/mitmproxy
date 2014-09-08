@@ -31,7 +31,7 @@ def getunpackers():
             try:
                 module = __import__(modname, fromlist=interface)
             except ImportError:
-                raise UnpackingError('Bad unpacker: %s' % modname)
+                raise
             else:
                 unpackers.append(module)
 
