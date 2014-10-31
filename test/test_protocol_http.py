@@ -110,6 +110,30 @@ class TestHTTPRequest:
                                 "Content-Length: 0\r\n\r\n")
 
 
+    def test_http_options_relative_form_in(self):
+        """
+        Exercises fix for Issue #xxx.
+        """
+        s = StringIO("OPTIONS /secret/resource HTTP/1.1")
+        r = HTTPRequest.from_stream(s)
+        r.host = 'address'
+        r.port = 80
+        r.scheme = "http"
+        assert r.assemble() == ("OPTIONS "
+                                "/secret/resource "
+                                "HTTP/1.1\r\nHost: address\r\n\r\n")
+
+    def test_http_options_absolute_form_in(self):
+        s = StringIO("OPTIONS http://address/secret/resource HTTP/1.1")
+        r = HTTPRequest.from_stream(s)
+        r.host = 'address'
+        r.port = 80
+        r.scheme = "http"
+        assert r.assemble() == ("OPTIONS "
+                                "http://address:80/secret/resource "
+                                "HTTP/1.1\r\nHost: address\r\n\r\n")
+
+
     def test_assemble_unknown_form(self):
         r = tutils.treq()
         tutils.raises("Invalid request form", r.assemble, "antiauthority")
