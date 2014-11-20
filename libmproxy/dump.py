@@ -155,7 +155,7 @@ class DumpMaster(flow.FlowMaster):
         return flows
 
     def add_event(self, e, level="info"):
-        needed = dict(error=1, info=1, debug=2).get(level, 1)
+        needed = dict(error=0, info=1, debug=2).get(level, 1)
         if self.o.verbosity >= needed:
             print >> self.outfile, e
             self.outfile.flush()
@@ -205,7 +205,7 @@ class DumpMaster(flow.FlowMaster):
         elif self.o.flow_detail >= 3:
             print >> self.outfile, str_request(f, self.showhost)
             print >> self.outfile, self.indent(4, f.request.headers)
-            if utils.isBin(f.request.content):
+            if f.request.content != http.CONTENT_MISSING and utils.isBin(f.request.content):
                 d = netlib.utils.hexdump(f.request.content)
                 d = "\n".join("%s\t%s %s"%i for i in d)
                 print >> self.outfile, self.indent(4, d)

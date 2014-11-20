@@ -516,7 +516,8 @@ class ConsoleMaster(flow.FlowMaster):
             self.start_server_playback(
                 ret,
                 self.killextra, self.rheaders,
-                False, self.nopop
+                False, self.nopop,
+                self.options.replay_ignore_params, self.options.replay_ignore_content
             )
 
     def spawn_editor(self, data):
@@ -819,7 +820,7 @@ class ConsoleMaster(flow.FlowMaster):
                     self.statusbar.redraw()
                     size = self.drawscreen()
                 changed = self.tick(self.masterq, 0.01)
-                self.ui.set_input_timeouts(max_wait=0.1)
+                self.ui.set_input_timeouts(max_wait=0.01)
                 keys = self.ui.get_input()
                 if keys:
                     changed = True
@@ -1049,7 +1050,7 @@ class ConsoleMaster(flow.FlowMaster):
         self.eventlist[:] = []
 
     def add_event(self, e, level="info"):
-        needed = dict(error=1, info=1, debug=2).get(level, 1)
+        needed = dict(error=0, info=1, debug=2).get(level, 1)
         if self.options.verbosity < needed:
             return
 

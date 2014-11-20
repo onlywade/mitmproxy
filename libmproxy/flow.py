@@ -27,7 +27,12 @@ class AppRegistry:
             Add a WSGI app to the registry, to be served for requests to the
             specified domain, on the specified port.
         """
-        self.apps[(domain, port)] = wsgi.WSGIAdaptor(app, domain, port, version.NAMEVERSION)
+        self.apps[(domain, port)] = wsgi.WSGIAdaptor(
+            app,
+            domain,
+            port,
+            version.NAMEVERSION
+        )
 
     def get(self, request):
         """
@@ -72,7 +77,8 @@ class ReplaceHooks:
 
     def get_specs(self):
         """
-            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s) tuples.
+            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s)
+            tuples.
         """
         return [i[:3] for i in self.lst]
 
@@ -119,7 +125,8 @@ class SetHeaders:
 
     def get_specs(self):
         """
-            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s) tuples.
+            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s)
+            tuples.
         """
         return [i[:3] for i in self.lst]
 
@@ -162,6 +169,7 @@ class ClientPlaybackState:
     def __init__(self, flows, exit):
         self.flows, self.exit = flows, exit
         self.current = None
+        self.testing = False  # Disables actual replay for testing.
 
     def count(self):
         return len(self.flows)
@@ -179,18 +187,16 @@ class ClientPlaybackState:
         if flow is self.current:
             self.current = None
 
-    def tick(self, master, testing=False):
-        """
-            testing: Disables actual replay for testing.
-        """
+    def tick(self, master):
         if self.flows and not self.current:
-            n = self.flows.pop(0)
-            n.reply = controller.DummyReply()
-            self.current = master.handle_request(n)
-            if not testing and not self.current.response:
-                master.replay_request(self.current)  # pragma: no cover
-            elif self.current.response:
-                master.handle_response(self.current)
+            self.current = self.flows.pop(0).copy()
+            if not self.testing:
+                master.replay_request(self.current)
+            else:
+                self.current.reply = controller.DummyReply()
+                master.handle_request(self.current)
+                if self.current.response:
+                    master.handle_response(self.current)
 
 
 class ServerPlaybackState:
@@ -363,6 +369,8 @@ class State(object):
         """
             Add a request to the state. Returns the matching flow.
         """
+        if flow in self._flow_list:  # catch flow replay
+            return flow
         self._flow_list.append(flow)
         if flow.match(self._limit):
             self.view.append(flow)
@@ -608,7 +616,7 @@ class FlowMaster(controller.Master):
             ]
             if all(e):
                 self.shutdown()
-            self.client_playback.tick(self, timeout)
+            self.client_playback.tick(self)
 
         return controller.Master.tick(self, q, timeout)
 
