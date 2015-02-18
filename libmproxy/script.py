@@ -20,6 +20,12 @@ class ScriptContext:
         """
         self._master.add_event(message, level)
 
+    def kill_flow(self, f):
+        """
+            Kills a flow immediately. No further data will be sent to the client or the server.
+        """
+        f.kill(self._master)
+
     def duplicate_flow(self, f):
         """
             Returns a duplicate of the specified flow. The flow is also
@@ -36,7 +42,7 @@ class ScriptContext:
             Replay the request on the current flow. The response will be added
             to the flow object.
         """
-        self._master.replay_request(f)
+        return self._master.replay_request(f, block=True, run_scripthooks=False)
 
     @property
     def app_registry(self):
@@ -139,8 +145,12 @@ def _handle_concurrent_reply(fn, o, *args, **kwargs):
 
     def run():
         fn(*args, **kwargs)
-        o.reply()  # If the script did not call .reply(), we have to do it now.
-    threading.Thread(target=run, name="ScriptThread").start()
+        reply_proxy()  # If the script did not call .reply(), we have to do it now.
+    ScriptThread(target=run).start()
+
+
+class ScriptThread(threading.Thread):
+    name = "ScriptThread"
 
 
 def concurrent(fn):

@@ -1,3 +1,5 @@
+var _ = require("lodash");
+
 var _MessageUtils = {
     getContentType: function (message) {
         return this.get_first_header(message, /^Content-Type$/i);
@@ -22,6 +24,16 @@ var _MessageUtils = {
             message._headerLookups[regex] = header ? header[1] : undefined;
         }
         return message._headerLookups[regex];
+    },
+    match_header: function (message, regex) {
+        var headers = message.headers;
+        var i = headers.length;
+        while (i--) {
+            if (regex.test(headers[i].join(" "))) {
+                return headers[i];
+            }
+        }
+        return false;
     }
 };
 
@@ -45,3 +57,10 @@ var RequestUtils = _.extend(_MessageUtils, {
 });
 
 var ResponseUtils = _.extend(_MessageUtils, {});
+
+
+module.exports = {
+    ResponseUtils: ResponseUtils,
+    RequestUtils: RequestUtils
+
+}

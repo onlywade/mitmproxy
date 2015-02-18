@@ -71,19 +71,28 @@ class Flow(stateobject.StateObject):
 
         self.error = None
         """@type: Error"""
+        self.intercepted = False
+        """@type: bool"""
         self._backup = None
+        self.reply = None
 
     _stateobject_attributes = dict(
         id=str,
         error=Error,
         client_conn=ClientConnection,
         server_conn=ServerConnection,
-        type=str
+        type=str,
+        intercepted=bool
     )
 
     def get_state(self, short=False):
         d = super(Flow, self).get_state(short)
         d.update(version=version.IVERSION)
+        if self._backup and self._backup != d:
+            if short:
+                d.update(modified=True)
+            else:
+                d.update(backup=self._backup)
         return d
 
     def __eq__(self, other):
@@ -92,6 +101,8 @@ class Flow(stateobject.StateObject):
     def copy(self):
         f = copy.copy(self)
 
+        f.id = str(uuid.uuid4())
+        f.live = False
         f.client_conn = self.client_conn.copy()
         f.server_conn = self.server_conn.copy()
 
@@ -123,6 +134,36 @@ class Flow(stateobject.StateObject):
         if self._backup:
             self.load_state(self._backup)
             self._backup = None
+
+    def kill(self, master):
+        """
+            Kill this request.
+        """
+        self.error = Error("Connection killed")
+        self.intercepted = False
+        self.reply(KILL)
+        master.handle_error(self)
+
+    def intercept(self, master):
+        """
+            Intercept this Flow. Processing will stop until accept_intercept is
+            called.
+        """
+        if self.intercepted:
+            return
+        self.intercepted = True
+        master.handle_intercept(self)
+
+    def accept_intercept(self, master):
+        """
+            Continue with the flow - called after an intercept().
+        """
+        if not self.intercepted:
+            return
+        self.intercepted = False
+        self.reply()
+        master.handle_accept_intercept(self)
+
 
 
 class ProtocolHandler(object):
@@ -188,7 +229,7 @@ class LiveConnection(object):
             (
                 ssl != self.c.server_conn.ssl_established
                 or
-                (sni is not None and sni != self.c.sni)
+                (sni is not None and sni != self.c.server_conn.sni)
             )
         )
         address_mismatch = (address != self.c.server_conn.address)
@@ -219,10 +260,8 @@ class LiveConnection(object):
 
             self.c.set_server_address(address)
             self.c.establish_server_connection(ask=False)
-            if sni:
-                self.c.sni = sni
             if ssl:
-                self.c.establish_ssl(server=True)
+                self.c.establish_ssl(server=True, sni=sni)
             return True
         return False
 

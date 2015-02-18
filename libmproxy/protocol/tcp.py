@@ -3,6 +3,7 @@ import select
 import socket
 from .primitives import ProtocolHandler
 from netlib.utils import cleanBin
+from netlib.tcp import NetLibError
 
 
 class TCPHandler(ProtocolHandler):
@@ -55,7 +56,9 @@ class TCPHandler(ProtocolHandler):
                         conns.remove(src.rfile)
                         # Shutdown connection to the other peer
                         if dst.ssl_established:
-                            dst.connection.shutdown()
+                            # We can't half-close a connection, so we just close everything here.
+                            # Sockets will be cleaned up on a higher level.
+                            return
                         else:
                             dst.connection.shutdown(socket.SHUT_WR)
 
@@ -76,7 +79,8 @@ class TCPHandler(ProtocolHandler):
                                 ),
                                 "info"
                             )
-                        dst.connection.send(contents)
+                        # Do not use dst.connection.send here, which may raise OpenSSL-specific errors.
+                        dst.send(contents)
                     else:
                         # socket.socket.send supports raw bytearrays/memoryviews
                         if self.log:
@@ -87,6 +91,6 @@ class TCPHandler(ProtocolHandler):
                                 "info"
                             )
                         dst.connection.send(buf[:size])
-        except socket.error as e:
+        except (socket.error, NetLibError) as e:
             self.c.log("TCP connection closed unexpectedly.", "debug")
             return

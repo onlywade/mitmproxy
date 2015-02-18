@@ -3,7 +3,7 @@ import os, sys, copy
 import urwid
 from . import common, grideditor, contentview
 from .. import utils, flow, controller
-from ..protocol.http import HTTPResponse, CONTENT_MISSING
+from ..protocol.http import HTTPRequest, HTTPResponse, CONTENT_MISSING, decoded
 
 
 class SearchError(Exception): pass
@@ -19,6 +19,7 @@ def _mkhelp():
         ("D", "duplicate flow"),
         ("e", "edit request/response"),
         ("f", "load full body data"),
+        ("g", "copy response(content/headers) to clipboard"),        
         ("m", "change body display mode for this entity"),
             (None,
                 common.highlight_key("automatic", "a") +
@@ -108,16 +109,6 @@ cache = CallbackCache()
 class FlowView(common.WWrap):
     REQ = 0
     RESP = 1
-    method_options = [
-        ("get", "g"),
-        ("post", "p"),
-        ("put", "u"),
-        ("head", "h"),
-        ("trace", "t"),
-        ("delete", "d"),
-        ("options", "o"),
-        ("edit raw", "e"),
-    ]
 
     highlight_color = "focusfield"
 
@@ -129,8 +120,8 @@ class FlowView(common.WWrap):
         else:
             self.view_request()
 
-    def _cached_content_view(self, viewmode, hdrItems, content, limit):
-        return contentview.get_content_view(viewmode, hdrItems, content, limit, self.master.add_event)
+    def _cached_content_view(self, viewmode, hdrItems, content, limit, is_request):
+        return contentview.get_content_view(viewmode, hdrItems, content, limit, self.master.add_event, is_request)
 
     def content_view(self, viewmode, conn):
         full = self.state.get_flow_setting(
@@ -147,7 +138,8 @@ class FlowView(common.WWrap):
                     viewmode,
                     tuple(tuple(i) for i in conn.headers.lst),
                     conn.content,
-                    limit
+                    limit,
+                    isinstance(conn, HTTPRequest)
                 )
         return (description, text_objects)
 
@@ -230,7 +222,7 @@ class FlowView(common.WWrap):
     def wrap_body(self, active, body):
         parts = []
 
-        if self.flow.intercepting and not self.flow.reply.acked and not self.flow.response:
+        if self.flow.intercepted and not self.flow.reply.acked and not self.flow.response:
             qt = "Request intercepted"
         else:
             qt = "Request"
@@ -239,7 +231,7 @@ class FlowView(common.WWrap):
         else:
             parts.append(self._tab(qt, "heading_inactive"))
 
-        if self.flow.intercepting and not self.flow.reply.acked and self.flow.response:
+        if self.flow.intercepted and not self.flow.reply.acked and self.flow.response:
             st = "Response intercepted"
         else:
             st = "Response"
@@ -502,26 +494,10 @@ class FlowView(common.WWrap):
         if m == "e":
             self.master.prompt_edit("Method", self.flow.request.method, self.set_method_raw)
         else:
-            for i in self.method_options:
+            for i in common.METHOD_OPTIONS:
                 if i[1] == m:
                     self.flow.request.method = i[0].upper()
             self.master.refresh_flow(self.flow)
-
-    def save_body(self, path):
-        if not path:
-            return
-        self.state.last_saveload = path
-        if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-            c = self.flow.request
-        else:
-            c = self.flow.response
-        path = os.path.expanduser(path)
-        try:
-            f = file(path, "wb")
-            f.write(str(c.content))
-            f.close()
-        except IOError, v:
-            self.master.statusbar.message(v.strerror)
 
     def set_url(self, url):
         request = self.flow.request
@@ -570,23 +546,27 @@ class FlowView(common.WWrap):
 
     def edit(self, part):
         if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-            conn = self.flow.request
+            message = self.flow.request
         else:
             if not self.flow.response:
                 self.flow.response = HTTPResponse(
-                    self.flow.request,
                     self.flow.request.httpversion,
-                    200, "OK", flow.ODictCaseless(), "", None
+                    200, "OK", flow.ODictCaseless(), ""
                 )
                 self.flow.response.reply = controller.DummyReply()
-            conn = self.flow.response
+            message = self.flow.response
 
         self.flow.backup()
         if part == "r":
-            c = self.master.spawn_editor(conn.content or "")
-            conn.content = c.rstrip("\n") # what?
+            with decoded(message):
+                # Fix an issue caused by some editors when editing a request/response body.
+                # Many editors make it hard to save a file without a terminating newline on the last
+                # line. When editing message bodies, this can cause problems. For now, I just
+                # strip the newlines off the end of the body when we return from an editor.
+                c = self.master.spawn_editor(message.content or "")
+                message.content = c.rstrip("\n")
         elif part == "f":
-            if not conn.get_form_urlencoded() and conn.content:
+            if not message.get_form_urlencoded() and message.content:
                 self.master.prompt_onekey(
                     "Existing body is not a URL-encoded form. Clear and edit?",
                     [
@@ -594,26 +574,26 @@ class FlowView(common.WWrap):
                         ("no", "n"),
                     ],
                     self.edit_form_confirm,
-                    conn
+                    message
                 )
             else:
-                self.edit_form(conn)
+                self.edit_form(message)
         elif part == "h":
-            self.master.view_grideditor(grideditor.HeaderEditor(self.master, conn.headers.lst, self.set_headers, conn))
+            self.master.view_grideditor(grideditor.HeaderEditor(self.master, message.headers.lst, self.set_headers, message))
         elif part == "p":
-            p = conn.get_path_components()
+            p = message.get_path_components()
             p = [[i] for i in p]
-            self.master.view_grideditor(grideditor.PathEditor(self.master, p, self.set_path_components, conn))
+            self.master.view_grideditor(grideditor.PathEditor(self.master, p, self.set_path_components, message))
         elif part == "q":
-            self.master.view_grideditor(grideditor.QueryEditor(self.master, conn.get_query().lst, self.set_query, conn))
+            self.master.view_grideditor(grideditor.QueryEditor(self.master, message.get_query().lst, self.set_query, message))
         elif part == "u" and self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-            self.master.prompt_edit("URL", conn.url, self.set_url)
+            self.master.prompt_edit("URL", message.url, self.set_url)
         elif part == "m" and self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-            self.master.prompt_onekey("Method", self.method_options, self.edit_method)
+            self.master.prompt_onekey("Method", common.METHOD_OPTIONS, self.edit_method)
         elif part == "c" and self.state.view_flow_mode == common.VIEW_FLOW_RESPONSE:
-            self.master.prompt_edit("Code", str(conn.code), self.set_resp_code)
+            self.master.prompt_edit("Code", str(message.code), self.set_resp_code)
         elif part == "m" and self.state.view_flow_mode == common.VIEW_FLOW_RESPONSE:
-            self.master.prompt_edit("Message", conn.msg, self.set_resp_msg)
+            self.master.prompt_edit("Message", message.msg, self.set_resp_msg)
         self.master.refresh_flow(self.flow)
 
     def _view_nextprev_flow(self, np, flow):
@@ -678,25 +658,16 @@ class FlowView(common.WWrap):
             # Why doesn't this just work??
             self.w.keypress(size, key)
         elif key == "a":
-            self.flow.accept_intercept()
+            self.flow.accept_intercept(self.master)
             self.master.view_flow(self.flow)
         elif key == "A":
             self.master.accept_all()
             self.master.view_flow(self.flow)
         elif key == "b":
-            if conn:
-                if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-                    self.master.path_prompt(
-                        "Save request body: ",
-                        self.state.last_saveload,
-                        self.save_body
-                    )
-                else:
-                    self.master.path_prompt(
-                        "Save response body: ",
-                        self.state.last_saveload,
-                        self.save_body
-                    )
+            if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
+                common.ask_save_body("q", self.master, self.state, self.flow)
+            else:
+                common.ask_save_body("s", self.master, self.state, self.flow)
         elif key == "d":
             if self.state.flow_count() == 1:
                 self.master.view_flowlist()
@@ -747,6 +718,12 @@ class FlowView(common.WWrap):
             )
             self.master.refresh_flow(self.flow)
             self.master.statusbar.message("")
+        elif key == "g":
+            if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
+                scope = "q"
+            else:
+                scope = "s"
+            common.ask_copy_part(scope, self.flow, self.master, self.state)
         elif key == "m":
             p = list(contentview.view_prompts)
             p.insert(0, ("Clear", "C"))
@@ -759,7 +736,6 @@ class FlowView(common.WWrap):
         elif key == "p":
             self.view_prev_flow(self.flow)
         elif key == "r":
-            self.flow.backup()
             r = self.master.replay_request(self.flow)
             if r:
                 self.master.statusbar.message(r)

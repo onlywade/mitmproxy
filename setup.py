@@ -19,9 +19,9 @@ deps = {
     "netlib>=%s, <%s" % (version.MINORVERSION, version.NEXT_MINORVERSION),
     "pyasn1>0.1.2",
     "pyOpenSSL>=0.14",
-    "Flask>=0.10.1",
     "tornado>=4.0.2",
-    "configargparse>=0.9.3"
+    "configargparse>=0.9.3",
+    "pyperclip>=1.5.8"
 }
 script_deps = {
     "mitmproxy": {
@@ -34,8 +34,7 @@ script_deps = {
 for script in scripts:
     deps.update(script_deps[script])
 if os.name == "nt":
-    deps.add("pydivert>=0.0.4")  # Transparent proxying on Windows
-
+    deps.add("pydivert>=0.0.7")  # Transparent proxying on Windows
 
 setup(
     name="mitmproxy",
@@ -56,6 +55,8 @@ setup(
         "Programming Language :: Python",
         "Programming Language :: Python :: 2",
         "Programming Language :: Python :: 2.7",
+        "Programming Language :: Python :: Implementation :: CPython",
+        "Programming Language :: Python :: Implementation :: PyPy",
         "Topic :: Security",
         "Topic :: Internet",
         "Topic :: Internet :: WWW/HTTP",
@@ -64,7 +65,7 @@ setup(
     ],
     packages=find_packages(),
     include_package_data=True,
-    scripts = scripts,
+    scripts=scripts,
     install_requires=list(deps),
     extras_require={
         'dev': [

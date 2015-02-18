@@ -36,9 +36,10 @@ class Options(object):
         "stickyauth",
         "stream_large_bodies",
         "verbosity",
-        "wfile",
+        "outfile",
         "replay_ignore_content",
         "replay_ignore_params",
+        "replay_ignore_payload_params",
     ]
 
     def __init__(self, **kwargs):
@@ -78,6 +79,7 @@ class DumpMaster(flow.FlowMaster):
         self.replay_ignore_params = options.replay_ignore_params
         self.replay_ignore_content = options.replay_ignore_content
         self.refresh_server_playback = options.refresh_server_playback
+        self.replay_ignore_payload_params = options.replay_ignore_payload_params
 
         self.set_stream_large_bodies(options.stream_large_bodies)
 
@@ -92,10 +94,10 @@ class DumpMaster(flow.FlowMaster):
         if options.stickyauth:
             self.set_stickyauth(options.stickyauth)
 
-        if options.wfile:
-            path = os.path.expanduser(options.wfile)
+        if options.outfile:
+            path = os.path.expanduser(options.outfile[0])
             try:
-                f = file(path, "wb")
+                f = file(path, options.outfile[1])
                 self.start_stream(f, self.filt)
             except IOError, v:
                 raise DumpError(v.strerror)
@@ -115,7 +117,8 @@ class DumpMaster(flow.FlowMaster):
                 not options.keepserving,
                 options.nopop,
                 options.replay_ignore_params,
-                options.replay_ignore_content
+                options.replay_ignore_content,
+                options.replay_ignore_payload_params,
             )
 
         if options.client_replay:
@@ -131,28 +134,24 @@ class DumpMaster(flow.FlowMaster):
                 raise DumpError(err)
 
         if options.rfile:
-            path = os.path.expanduser(options.rfile)
             try:
-                f = file(path, "rb")
-                freader = flow.FlowReader(f)
-            except IOError, v:
-                raise DumpError(v.strerror)
-            try:
-                self.load_flows(freader)
+                self.load_flows_file(options.rfile)
             except flow.FlowReadError, v:
-                self.add_event("Flow file corrupted. Stopped loading.", "error")
+                self.add_event("Flow file corrupted.", "error")
+                raise DumpError(v)
 
         if self.o.app:
             self.start_app(self.o.app_host, self.o.app_port)
 
-    def _readflow(self, path):
-        path = os.path.expanduser(path)
+    def _readflow(self, paths):
+        """
+        Utitility function that reads a list of flows
+        or raises a DumpError if that fails.
+        """
         try:
-            f = file(path, "rb")
-            flows = list(flow.FlowReader(f).stream())
-        except (IOError, flow.FlowReadError), v:
-            raise DumpError(v.strerror)
-        return flows
+            return flow.read_flows_from_paths(paths)
+        except flow.FlowReadError as e:
+            raise DumpError(e.strerror)
 
     def add_event(self, e, level="info"):
         needed = dict(error=0, info=1, debug=2).get(level, 1)

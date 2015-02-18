@@ -117,7 +117,10 @@ class HTTPMessage(stateobject.StateObject):
     def get_state(self, short=False):
         ret = super(HTTPMessage, self).get_state(short)
         if short:
-            ret["contentLength"] = len(self.content)
+            if self.content:
+                ret["contentLength"] = len(self.content)
+            else:
+                ret["contentLength"] = 0
         return ret
 
     def get_decoded_content(self):
@@ -306,7 +309,8 @@ class HTTPRequest(HTTPMessage):
         host=str,
         port=int,
         path=str,
-        form_out=str
+        form_out=str,
+        is_replay=bool
     )
 
     @classmethod
@@ -419,17 +423,19 @@ class HTTPRequest(HTTPMessage):
             raise http.HttpError(400, "Invalid request form")
         return request_line
 
+    # This list is adopted legacy code.
+    # We probably don't need to strip off keep-alive.
+    _headers_to_strip_off = ['Proxy-Connection',
+                             'Keep-Alive',
+                             'Connection',
+                             'Transfer-Encoding',
+                             'Upgrade']
+
     def _assemble_headers(self):
         headers = self.headers.copy()
-        for k in ['Proxy-Connection',
-                  'Keep-Alive',
-                  'Connection',
-                  'Transfer-Encoding']:
+        for k in self._headers_to_strip_off:
             del headers[k]
-        if headers["Upgrade"] == ["h2c"]:
-            # Suppress HTTP2 https://http2.github.io/http2-spec/index.html#discover-http
-            del headers["Upgrade"]
-        if not 'host' in headers and self.scheme and self.host and self.port:
+        if 'host' not in headers and self.scheme and self.host and self.port:
             headers["Host"] = [utils.hostport(self.scheme,
                                               self.host,
                                               self.port)]
@@ -750,11 +756,13 @@ class HTTPResponse(HTTPMessage):
         return 'HTTP/%s.%s %s %s' % \
                (self.httpversion[0], self.httpversion[1], self.code, self.msg)
 
+    _headers_to_strip_off = ['Proxy-Connection',
+                             'Alternate-Protocol',
+                             'Alt-Svc']
+
     def _assemble_headers(self, preserve_transfer_encoding=False):
         headers = self.headers.copy()
-        for k in ['Proxy-Connection',
-                  'Alternate-Protocol',
-                  'Alt-Svc']:
+        for k in self._headers_to_strip_off:
             del headers[k]
         if not preserve_transfer_encoding:
             del headers['Transfer-Encoding']
@@ -875,7 +883,7 @@ class HTTPFlow(Flow):
 
     The following additional attributes are exposed:
 
-        intercepting: Is this flow currently being intercepted?
+        intercepted: Is this flow currently being intercepted?
         live: Does this flow have a live client connection?
     """
 
@@ -885,9 +893,6 @@ class HTTPFlow(Flow):
         """@type: HTTPRequest"""
         self.response = None
         """@type: HTTPResponse"""
-
-        # FIXME: Should that rather be an attribute of Flow?
-        self.intercepting = False
 
     _stateobject_attributes = Flow._stateobject_attributes.copy()
     _stateobject_attributes.update(
@@ -934,30 +939,6 @@ class HTTPFlow(Flow):
         if f:
             return f(self)
         return True
-
-    def kill(self, master):
-        """
-            Kill this request.
-        """
-        self.error = Error("Connection killed")
-        self.intercepting = False
-        self.reply(KILL)
-        self.reply = controller.DummyReply()
-        master.handle_error(self)
-
-    def intercept(self):
-        """
-            Intercept this Flow. Processing will stop until accept_intercept is
-            called.
-        """
-        self.intercepting = True
-
-    def accept_intercept(self):
-        """
-            Continue with the flow - called after an intercept().
-        """
-        self.intercepting = False
-        self.reply()
 
     def replace(self, pattern, repl, *args, **kwargs):
         """
@@ -1015,7 +996,7 @@ class HTTPHandler(ProtocolHandler):
                     include_body=False
                 )
                 break
-            except (tcp.NetLibDisconnect, http.HttpErrorConnClosed), v:
+            except (tcp.NetLibError, http.HttpErrorConnClosed), v:
                 self.c.log(
                     "error in server communication: %s" % repr(v),
                     level="debug"
@@ -1039,7 +1020,7 @@ class HTTPHandler(ProtocolHandler):
         # call the appropriate script hook - this is an opportunity for an
         # inline script to set flow.stream = True
         flow = self.c.channel.ask("responseheaders", flow)
-        if flow == KILL:
+        if flow is None or flow == KILL:
             raise KillSignal()
         else:
             # now get the rest of the request body, if body still needs to be
@@ -1062,7 +1043,7 @@ class HTTPHandler(ProtocolHandler):
                     self.c.client_conn.rfile,
                     body_size_limit=self.c.config.body_size_limit
                 )
-            except tcp.NetLibDisconnect:
+            except tcp.NetLibError:
                 # don't throw an error for disconnects that happen
                 # before/between requests.
                 return False
@@ -1082,10 +1063,10 @@ class HTTPHandler(ProtocolHandler):
             # sent through to the Master.
             flow.request = req
             request_reply = self.c.channel.ask("request", flow)
-            self.process_server_address(flow)  # The inline script may have changed request.host
-
             if request_reply is None or request_reply == KILL:
                 raise KillSignal()
+
+            self.process_server_address(flow)  # The inline script may have changed request.host
 
             if isinstance(request_reply, HTTPResponse):
                 flow.response = request_reply
@@ -1160,7 +1141,7 @@ class HTTPHandler(ProtocolHandler):
         message = repr(error)
         message_debug = None
 
-        if isinstance(error, tcp.NetLibDisconnect):
+        if isinstance(error, tcp.NetLibError):
             message = None
             message_debug = "TCP connection closed unexpectedly."
         elif "tlsv1 alert unknown ca" in message:
@@ -1198,7 +1179,7 @@ class HTTPHandler(ProtocolHandler):
                 <head>
                     <title>%d %s</title>
                 </head>
-                <body %s</body>
+                <body>%s</body>
             </html>
         """ % (code, response, message)
         self.c.client_conn.wfile.write("HTTP/1.1 %s %s\r\n" % (code, response))
@@ -1397,6 +1378,12 @@ class HTTPHandler(ProtocolHandler):
 
             # In practice, nobody issues a CONNECT request to send unencrypted HTTP requests afterwards.
             # If we don't delegate to TCP mode, we should always negotiate a SSL connection.
+            #
+            # FIXME:
+            # Turns out the previous statement isn't entirely true. Chrome on Windows CONNECTs to :80
+            # if an explicit proxy is configured and a websocket connection should be established.
+            # We don't support websocket at the moment, so it fails anyway, but we should come up with
+            # a better solution to this if we start to support WebSockets.
             should_establish_ssl = (
                 address.port in self.c.config.ssl_ports
                 or
@@ -1429,20 +1416,31 @@ class RequestReplayThread(threading.Thread):
     name = "RequestReplayThread"
 
     def __init__(self, config, flow, masterq, should_exit):
-        self.config, self.flow, self.channel = config, flow, controller.Channel(masterq, should_exit)
-        threading.Thread.__init__(self)
+        """
+        masterqueue can be a queue or None, if no scripthooks should be processed.
+        """
+        self.config, self.flow = config, flow
+        if masterq:
+            self.channel = controller.Channel(masterq, should_exit)
+        else:
+            self.channel = None
+        super(RequestReplayThread, self).__init__()
 
     def run(self):
         r = self.flow.request
         form_out_backup = r.form_out
         try:
             self.flow.response = None
-            request_reply = self.channel.ask("request", self.flow)
-            if request_reply is None or request_reply == KILL:
-                raise KillSignal()
-            elif isinstance(request_reply, HTTPResponse):
-                self.flow.response = request_reply
-            else:
+
+            # If we have a channel, run script hooks.
+            if self.channel:
+                request_reply = self.channel.ask("request", self.flow)
+                if request_reply is None or request_reply == KILL:
+                    raise KillSignal()
+                elif isinstance(request_reply, HTTPResponse):
+                    self.flow.response = request_reply
+
+            if not self.flow.response:
                 # In all modes, we directly connect to the server displayed
                 if self.config.mode == "upstream":
                     server_address = self.config.mode.get_upstream_server(self.flow.client_conn)[2:]
@@ -1461,18 +1459,20 @@ class RequestReplayThread(threading.Thread):
                     if r.scheme == "https":
                         server.establish_ssl(self.config.clientcerts, sni=self.flow.server_conn.sni)
                     r.form_out = "relative"
-
                 server.send(r.assemble())
                 self.flow.server_conn = server
                 self.flow.response = HTTPResponse.from_stream(server.rfile, r.method,
                                                               body_size_limit=self.config.body_size_limit)
-            response_reply = self.channel.ask("response", self.flow)
-            if response_reply is None or response_reply == KILL:
-                raise KillSignal()
+            if self.channel:
+                response_reply = self.channel.ask("response", self.flow)
+                if response_reply is None or response_reply == KILL:
+                    raise KillSignal()
         except (proxy.ProxyError, http.HttpError, tcp.NetLibError) as v:
             self.flow.error = Error(repr(v))
-            self.channel.ask("error", self.flow)
+            if self.channel:
+                self.channel.ask("error", self.flow)
         except KillSignal:
+            # KillSignal should only be raised if there's a channel in the first place.
             self.channel.tell("log", proxy.Log("Connection killed", "info"))
         finally:
             r.form_out = form_out_backup

@@ -277,16 +277,16 @@ class ConsoleState(flow.State):
         d = self.flowsettings.get(flow, {})
         return d.get(key, default)
 
-    def add_request(self, f):
-        flow.State.add_request(self, f)
+    def add_flow(self, f):
+        super(ConsoleState, self).add_flow(f)
         if self.focus is None:
             self.set_focus(0)
         elif self.follow_focus:
             self.set_focus(len(self.view) - 1)
         return f
 
-    def add_response(self, resp):
-        f = flow.State.add_response(self, resp)
+    def update_flow(self, f):
+        super(ConsoleState, self).update_flow(f)
         if self.focus is None:
             self.set_focus(0)
         return f
@@ -331,6 +331,10 @@ class ConsoleState(flow.State):
         ret = flow.State.delete_flow(self, f)
         self.set_focus(self.focus)
         return ret
+
+    def clear(self):
+        self.focus = None
+        super(ConsoleState, self).clear()
 
 
 
@@ -419,6 +423,8 @@ class ConsoleMaster(flow.FlowMaster):
         self.eventlog = options.eventlog
         self.eventlist = urwid.SimpleListWalker([])
 
+        self.statusbar = None
+
         if options.client_replay:
             self.client_playback_path(options.client_replay)
 
@@ -432,20 +438,20 @@ class ConsoleMaster(flow.FlowMaster):
                     print >> sys.stderr, "Script load error:", err
                     sys.exit(1)
 
-        if options.wfile:
-            err = self.start_stream(options.wfile)
+        if options.outfile:
+            err = self.start_stream_to_path(options.outfile[0], options.outfile[1])
             if err:
-                print >> sys.stderr, "Script load error:", err
+                print >> sys.stderr, "Stream file error:", err
                 sys.exit(1)
 
         if options.app:
             self.start_app(self.options.app_host, self.options.app_port)
 
-    def start_stream(self, path):
+    def start_stream_to_path(self, path, mode="wb"):
         path = os.path.expanduser(path)
         try:
-            f = file(path, "wb")
-            flow.FlowMaster.start_stream(self, f, None)
+            f = file(path, mode)
+            self.start_stream(f, None)
         except IOError, v:
             return str(v)
         self.stream_path = path
@@ -492,32 +498,37 @@ class ConsoleMaster(flow.FlowMaster):
         self.eventlog = not self.eventlog
         self.view_flowlist()
 
-    def _readflow(self, path):
-        path = os.path.expanduser(path)
+    def _readflow(self, paths):
+        """
+        Utitility function that reads a list of flows
+        or prints an error to the UI if that fails.
+        Returns
+            - None, if there was an error.
+            - a list of flows, otherwise.
+        """
         try:
-            f = file(path, "rb")
-            flows = list(flow.FlowReader(f).stream())
-        except (IOError, flow.FlowReadError), v:
-            return True, v.strerror
-        return False, flows
+            return flow.read_flows_from_paths(paths)
+        except flow.FlowReadError as e:
+            if not self.statusbar:
+                print >> sys.stderr, e.strerror
+                sys.exit(1)
+            else:
+                self.statusbar.message(e.strerror)
+            return None
 
     def client_playback_path(self, path):
-        err, ret = self._readflow(path)
-        if err:
-            self.statusbar.message(ret)
-        else:
-            self.start_client_playback(ret, False)
+        flows = self._readflow(path)
+        if flows:
+            self.start_client_playback(flows, False)
 
     def server_playback_path(self, path):
-        err, ret = self._readflow(path)
-        if err:
-            self.statusbar.message(ret)
-        else:
+        flows = self._readflow(path)
+        if flows:
             self.start_server_playback(
-                ret,
+                flows,
                 self.killextra, self.rheaders,
                 False, self.nopop,
-                self.options.replay_ignore_params, self.options.replay_ignore_content
+                self.options.replay_ignore_params, self.options.replay_ignore_content, self.options.replay_ignore_payload_params
             )
 
     def spawn_editor(self, data):
@@ -595,13 +606,20 @@ class ConsoleMaster(flow.FlowMaster):
 
         self.view_flowlist()
 
-        self.server.start_slave(controller.Slave, controller.Channel(self.masterq, self.should_exit))
+        self.server.start_slave(
+            controller.Slave,
+            controller.Channel(self.masterq, self.should_exit)
+        )
 
         if self.options.rfile:
-            ret = self.load_flows(self.options.rfile)
+            ret = self.load_flows_path(self.options.rfile)
             if ret and self.state.flow_count():
-                self.add_event("File truncated or corrupted. Loaded as many flows as possible.","error")
-            elif not self.state.flow_count():
+                self.add_event(
+                    "File truncated or corrupted. "
+                    "Loaded as many flows as possible.",
+                    "error"
+                )
+            elif ret and not self.state.flow_count():
                 self.shutdown()
                 print >> sys.stderr, "Could not load file:", ret
                 sys.exit(1)
@@ -696,23 +714,16 @@ class ConsoleMaster(flow.FlowMaster):
     def load_flows_callback(self, path):
         if not path:
             return
-        ret = self.load_flows(path)
+        ret = self.load_flows_path(path)
         return ret or "Flows loaded from %s"%path
 
-    def load_flows(self, path):
+    def load_flows_path(self, path):
         self.state.last_saveload = path
-        path = os.path.expanduser(path)
-        try:
-            f = file(path, "rb")
-            fr = flow.FlowReader(f)
-        except IOError, v:
-            return v.strerror
         reterr = None
         try:
-            flow.FlowMaster.load_flows(self, fr)
+            flow.FlowMaster.load_flows_file(self, path)
         except flow.FlowReadError, v:
-            reterr = v.strerror
-        f.close()
+            reterr = str(v)
         if self.flow_list_walker:
             self.sync_list_view()
         return reterr
@@ -767,7 +778,7 @@ class ConsoleMaster(flow.FlowMaster):
         self.prompt_done()
 
     def accept_all(self):
-        self.state.accept_all()
+        self.state.accept_all(self)
 
     def set_limit(self, txt):
         v = self.state.set_limit(txt)
@@ -819,8 +830,8 @@ class ConsoleMaster(flow.FlowMaster):
                 if changed:
                     self.statusbar.redraw()
                     size = self.drawscreen()
-                changed = self.tick(self.masterq, 0.01)
-                self.ui.set_input_timeouts(max_wait=0.01)
+                changed = self.tick(self.masterq, timeout=0.1)
+                self.ui.set_input_timeouts(max_wait=0)
                 keys = self.ui.get_input()
                 if keys:
                     changed = True
@@ -1040,7 +1051,7 @@ class ConsoleMaster(flow.FlowMaster):
 
     def process_flow(self, f):
         if self.state.intercept and f.match(self.state.intercept) and not f.request.is_replay:
-            f.intercept()
+            f.intercept(self)
         else:
             f.reply()
         self.sync_list_view()

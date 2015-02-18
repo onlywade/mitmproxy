@@ -100,24 +100,32 @@ def parse_setheader(s):
 
 
 def parse_server_spec(url):
-    normalized_url = re.sub("^https?2", "", url)
-
-    p = http.parse_url(normalized_url)
-    if not p or not p[1]:
+    p = http.parse_url(url)
+    if not p or not p[1] or p[0] not in ("http", "https"):
         raise configargparse.ArgumentTypeError(
             "Invalid server specification: %s" % url
         )
 
-    if url.lower().startswith("https2http"):
-        ssl = [True, False]
-    elif url.lower().startswith("http2https"):
-        ssl = [False, True]
-    elif url.lower().startswith("https"):
+    if p[0].lower() == "https":
         ssl = [True, True]
     else:
         ssl = [False, False]
 
     return ssl + list(p[1:3])
+
+
+def parse_server_spec_special(url):
+    """
+    Provides additional support for http2https and https2http schemes.
+    """
+    normalized_url = re.sub("^https?2", "", url)
+    ret = parse_server_spec(normalized_url)
+    if url.lower().startswith("https2http"):
+        ret[0] = True
+    elif url.lower().startswith("http2https"):
+        ret[0] = False
+    return ret
+
 
 
 def get_common_options(options):
@@ -179,11 +187,12 @@ def get_common_options(options):
         stickyauth=stickyauth,
         stream_large_bodies=stream_large_bodies,
         showhost=options.showhost,
-        wfile=options.wfile,
+        outfile=options.outfile,
         verbosity=options.verbose,
         nopop=options.nopop,
         replay_ignore_content = options.replay_ignore_content,
-        replay_ignore_params = options.replay_ignore_params
+        replay_ignore_params = options.replay_ignore_params,
+        replay_ignore_payload_params = options.replay_ignore_payload_params
     )
 
 
@@ -192,6 +201,12 @@ def common_options(parser):
         '--version',
         action= 'version',
         version= "%(prog)s" + " " + version.VERSION
+    )
+    parser.add_argument(
+        '--shortversion',
+        action= 'version',
+        help = "show program's short version number and exit",
+        version = version.VERSION
     )
     parser.add_argument(
         "--anticache",
@@ -249,10 +264,16 @@ def common_options(parser):
         action="store_const", dest="verbose", default=1, const=2,
         help="Increase event log verbosity."
     )
-    parser.add_argument(
+    outfile = parser.add_mutually_exclusive_group()
+    outfile.add_argument(
         "-w", "--wfile",
-        action="store", dest="wfile", default=None,
+        action="store", dest="outfile", type=lambda f: (f, "wb"),
         help="Write flows to file."
+    )
+    outfile.add_argument(
+        "-a", "--afile",
+        action="store", dest="outfile", type=lambda f: (f, "ab"),
+        help="Append flows to file."
     )
     parser.add_argument(
         "-z", "--anticomp",
@@ -323,7 +344,7 @@ def common_options(parser):
     group.add_argument(
         "-R", "--reverse",
         action="store",
-        type=parse_server_spec,
+        type=parse_server_spec_special,
         dest="reverse_proxy",
         default=None,
         help="""
@@ -371,7 +392,7 @@ def common_options(parser):
 
     group = parser.add_argument_group("Onboarding App")
     group.add_argument(
-        "-a", "--noapp",
+        "--noapp",
         action="store_false", dest="app", default=True,
         help="Disable the mitmproxy onboarding app."
     )
@@ -397,14 +418,14 @@ def common_options(parser):
     group = parser.add_argument_group("Client Replay")
     group.add_argument(
         "-c", "--client-replay",
-        action="store", dest="client_replay", default=None, metavar="PATH",
+        action="append", dest="client_replay", default=None, metavar="PATH",
         help="Replay client requests from a saved file."
     )
 
     group = parser.add_argument_group("Server Replay")
     group.add_argument(
         "-S", "--server-replay",
-        action="store", dest="server_replay", default=None, metavar="PATH",
+        action="append", dest="server_replay", default=None, metavar="PATH",
         help="Replay server responses from a saved file."
     )
     group.add_argument(
@@ -432,13 +453,24 @@ def common_options(parser):
         help="Disable response pop from response flow. "
              "This makes it possible to replay same response multiple times."
     )
-    group.add_argument(
+    payload = group.add_mutually_exclusive_group()
+    payload.add_argument(
         "--replay-ignore-content",
         action="store_true", dest="replay_ignore_content", default=False,
         help="""
             Ignore request's content while searching for a saved flow to replay
         """
     )
+    payload.add_argument(
+        "--replay-ignore-payload-param",
+        action="append", dest="replay_ignore_payload_params", type=str,
+        help="""
+            Request's payload parameters (application/x-www-form-urlencoded) to
+            be ignored while searching for a saved flow to replay.
+            Can be passed multiple times.
+        """
+    )
+
     group.add_argument(
         "--replay-ignore-param",
         action="append", dest="replay_ignore_params", type=str,

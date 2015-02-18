@@ -75,39 +75,47 @@ class TestDumpMaster:
     def test_replay(self):
         cs = StringIO()
 
-        o = dump.Options(server_replay="nonexistent", kill=True)
+        o = dump.Options(server_replay=["nonexistent"], kill=True)
         tutils.raises(dump.DumpError, dump.DumpMaster, None, o, outfile=cs)
 
         with tutils.tmpdir() as t:
             p = os.path.join(t, "rep")
             self._flowfile(p)
 
-            o = dump.Options(server_replay=p, kill=True)
+            o = dump.Options(server_replay=[p], kill=True)
             m = dump.DumpMaster(None, o, outfile=cs)
 
             self._cycle(m, "content")
             self._cycle(m, "content")
 
-            o = dump.Options(server_replay=p, kill=False)
+            o = dump.Options(server_replay=[p], kill=False)
             m = dump.DumpMaster(None, o, outfile=cs)
             self._cycle(m, "nonexistent")
 
-            o = dump.Options(client_replay=p, kill=False)
+            o = dump.Options(client_replay=[p], kill=False)
             m = dump.DumpMaster(None, o, outfile=cs)
 
     def test_read(self):
         with tutils.tmpdir() as t:
             p = os.path.join(t, "read")
             self._flowfile(p)
-            assert "GET" in self._dummy_cycle(0, None, "", flow_detail=1, rfile=p)
+            assert "GET" in self._dummy_cycle(
+                0,
+                None,
+                "",
+                flow_detail=1,
+                rfile=p
+            )
 
             tutils.raises(
                 dump.DumpError, self._dummy_cycle,
                 0, None, "", verbosity=1, rfile="/nonexistent"
             )
+            tutils.raises(
+                dump.DumpError, self._dummy_cycle,
+                0, None, "", verbosity=1, rfile="test_dump.py"
+            )
 
-            # We now just ignore errors
-            self._dummy_cycle(0, None, "", verbosity=1, rfile=tutils.test_data.path("test_dump.py"))
 
     def test_options(self):
         o = dump.Options(verbosity = 2)
@@ -143,8 +151,15 @@ class TestDumpMaster:
     def test_write(self):
         with tutils.tmpdir() as d:
             p = os.path.join(d, "a")
-            self._dummy_cycle(1, None, "", wfile=p, verbosity=0)
+            self._dummy_cycle(1, None, "", outfile=(p,"wb"), verbosity=0)
             assert len(list(flow.FlowReader(open(p,"rb")).stream())) == 1
+
+    def test_write_append(self):
+        with tutils.tmpdir() as d:
+            p = os.path.join(d, "a.append")
+            self._dummy_cycle(1, None, "", outfile=(p,"wb"), verbosity=0)
+            self._dummy_cycle(1, None, "", outfile=(p,"ab"), verbosity=0)
+            assert len(list(flow.FlowReader(open(p,"rb")).stream())) == 2
 
     def test_write_err(self):
         tutils.raises(
@@ -153,7 +168,7 @@ class TestDumpMaster:
             1,
             None,
             "",
-            wfile = "nonexistentdir/foo"
+            outfile = ("nonexistentdir/foo", "wb")
         )
 
     def test_script(self):

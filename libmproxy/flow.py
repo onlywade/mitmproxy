@@ -2,16 +2,19 @@
     This module provides more sophisticated flow tracking and provides filtering and interception facilities.
 """
 from __future__ import absolute_import
+from abc import abstractmethod, ABCMeta
 import hashlib
 import Cookie
 import cookielib
+import os
 import re
-from netlib import odict, wsgi
+from netlib import odict, wsgi, tcp
 import netlib.http
 from . import controller, protocol, tnetstring, filt, script, version
 from .onboarding import app
 from .protocol import http, handle
 from .proxy.config import HostMatcher
+from .proxy.connection import ClientConnection, ServerConnection
 import urlparse
 
 ODict = odict.ODict
@@ -200,12 +203,12 @@ class ClientPlaybackState:
 
 
 class ServerPlaybackState:
-    def __init__(self, headers, flows, exit, nopop, ignore_params, ignore_content):
+    def __init__(self, headers, flows, exit, nopop, ignore_params, ignore_content, ignore_payload_params):
         """
             headers: Case-insensitive list of request headers that should be
             included in request-response matching.
         """
-        self.headers, self.exit, self.nopop, self.ignore_params, self.ignore_content = headers, exit, nopop, ignore_params, ignore_content
+        self.headers, self.exit, self.nopop, self.ignore_params, self.ignore_content, self.ignore_payload_params = headers, exit, nopop, ignore_params, ignore_content, ignore_payload_params
         self.fmap = {}
         for i in flows:
             if i.response:
@@ -224,22 +227,29 @@ class ServerPlaybackState:
         _, _, path, _, query, _ = urlparse.urlparse(r.url)
         queriesArray = urlparse.parse_qsl(query)
 
-        filtered = []
-        ignore_params = self.ignore_params or []
-        for p in queriesArray:
-            if p[0] not in ignore_params:
-                filtered.append(p)
-
         key = [
             str(r.host),
             str(r.port),
             str(r.scheme),
             str(r.method),
             str(path),
-         ]
-        if not self.ignore_content:
-            key.append(str(r.content))
+        ]
 
+        if not self.ignore_content:
+            form_contents = r.get_form_urlencoded()
+            if self.ignore_payload_params and form_contents:
+                key.extend(
+                    p for p in form_contents
+                    if p[0] not in self.ignore_payload_params
+                )
+            else:
+                key.append(str(r.content))
+
+        filtered = []
+        ignore_params = self.ignore_params or []
+        for p in queriesArray:
+            if p[0] not in ignore_params:
+                filtered.append(p)
         for p in filtered:
             key.append(p[0])
             key.append(p[1])
@@ -300,10 +310,10 @@ class StickyCookieState:
             # FIXME: We now know that Cookie.py screws up some cookies with
             # valid RFC 822/1123 datetime specifications for expiry. Sigh.
             c = Cookie.SimpleCookie(str(i))
-            m = c.values()[0]
-            k = self.ckey(m, f)
-            if self.domain_match(f.request.host, k[0]):
-                self.jar[self.ckey(m, f)] = m
+            for m in c.values():
+                k = self.ckey(m, f)
+                if self.domain_match(f.request.host, k[0]):
+                    self.jar[k] = m
 
     def handle_request(self, f):
         l = []
@@ -338,80 +348,222 @@ class StickyAuthState:
                 f.request.headers["authorization"] = self.hosts[host]
 
 
-class State(object):
-    def __init__(self):
-        self._flow_list = []
-        self.view = []
+class FlowList(object):
+    __metaclass__ = ABCMeta
 
-        # These are compiled filt expressions:
-        self._limit = None
-        self.intercept = None
+    def __iter__(self):
+        return iter(self._list)
 
-    @property
-    def limit_txt(self):
-        if self._limit:
-            return self._limit.pattern
-        else:
-            return None
+    def __contains__(self, item):
+        return item in self._list
 
-    def flow_count(self):
-        return len(self._flow_list)
+    def __getitem__(self, item):
+        return self._list[item]
+
+    def __nonzero__(self):
+        return bool(self._list)
+
+    def __len__(self):
+        return len(self._list)
 
     def index(self, f):
-        return self._flow_list.index(f)
+        return self._list.index(f)
 
-    def active_flow_count(self):
+    @abstractmethod
+    def _add(self, f):
+        return
+
+    @abstractmethod
+    def _update(self, f):
+        return
+
+    @abstractmethod
+    def _remove(self, f):
+        return
+
+
+class FlowView(FlowList):
+    def __init__(self, store, filt=None):
+        self._list = []
+        if not filt:
+            filt = lambda flow: True
+        self._build(store, filt)
+
+        self.store = store
+        self.store.views.append(self)
+
+    def _close(self):
+        self.store.views.remove(self)
+
+    def _build(self, flows, filt=None):
+        if filt:
+            self.filt = filt
+        self._list = list(filter(self.filt, flows))
+
+    def _add(self, f):
+        if self.filt(f):
+            self._list.append(f)
+
+    def _update(self, f):
+        if f not in self._list:
+            self._add(f)
+        elif not self.filt(f):
+            self._remove(f)
+
+    def _remove(self, f):
+        if f in self._list:
+            self._list.remove(f)
+
+    def _recalculate(self, flows):
+        self._build(flows)
+
+
+class FlowStore(FlowList):
+    """
+    Responsible for handling flows in the state:
+    Keeps a list of all flows and provides views on them.
+    """
+
+    def __init__(self):
+        self._list = []
+        self._set = set()  # Used for O(1) lookups
+        self.views = []
+        self._recalculate_views()
+
+    def get(self, flow_id):
+        for f in self._list:
+            if f.id == flow_id:
+                return f
+
+    def __contains__(self, f):
+        return f in self._set
+
+    def _add(self, f):
+        """
+        Adds a flow to the state.
+        The flow to add must not be present in the state.
+        """
+        self._list.append(f)
+        self._set.add(f)
+        for view in self.views:
+            view._add(f)
+
+    def _update(self, f):
+        """
+        Notifies the state that a flow has been updated.
+        The flow must be present in the state.
+        """
+        for view in self.views:
+            view._update(f)
+
+    def _remove(self, f):
+        """
+        Deletes a flow from the state.
+        The flow must be present in the state.
+        """
+        self._list.remove(f)
+        self._set.remove(f)
+        for view in self.views:
+            view._remove(f)
+
+    # Expensive bulk operations
+
+    def _extend(self, flows):
+        """
+        Adds a list of flows to the state.
+        The list of flows to add must not contain flows that are already in the state.
+        """
+        self._list.extend(flows)
+        self._set.update(flows)
+        self._recalculate_views()
+
+    def _clear(self):
+        self._list = []
+        self._set = set()
+        self._recalculate_views()
+
+    def _recalculate_views(self):
+        """
+        Expensive operation: Recalculate all the views after a bulk change.
+        """
+        for view in self.views:
+            view._recalculate(self)
+
+    # Utility functions.
+    # There are some common cases where we need to argue about all flows
+    # irrespective of filters on the view etc (i.e. on shutdown).
+
+    def active_count(self):
         c = 0
-        for i in self._flow_list:
+        for i in self._list:
             if not i.response and not i.error:
                 c += 1
         return c
 
-    def add_request(self, flow):
-        """
-            Add a request to the state. Returns the matching flow.
-        """
-        if flow in self._flow_list:  # catch flow replay
-            return flow
-        self._flow_list.append(flow)
-        if flow.match(self._limit):
-            self.view.append(flow)
-        return flow
+    # TODO: Should accept_all operate on views or on all flows?
+    def accept_all(self, master):
+        for f in self._list:
+            f.accept_intercept(master)
 
-    def add_response(self, f):
+    def kill_all(self, master):
+        for f in self._list:
+            f.kill(master)
+
+
+class State(object):
+    def __init__(self):
+        self.flows = FlowStore()
+        self.view = FlowView(self.flows, None)
+
+        # These are compiled filt expressions:
+        self.intercept = None
+
+    @property
+    def limit_txt(self):
+        return getattr(self.view.filt, "pattern", None)
+
+    def flow_count(self):
+        return len(self.flows)
+
+    # TODO: All functions regarding flows that don't cause side-effects should be moved into FlowStore.
+    def index(self, f):
+        return self.flows.index(f)
+
+    def active_flow_count(self):
+        return self.flows.active_count()
+
+    def add_flow(self, f):
         """
-            Add a response to the state. Returns the matching flow.
+            Add a request to the state.
         """
-        if not f:
-            return False
-        if f.match(self._limit) and not f in self.view:
-            self.view.append(f)
+        self.flows._add(f)
         return f
 
-    def add_error(self, f):
+    def update_flow(self, f):
         """
-            Add an error response to the state. Returns the matching flow, or
-            None if there isn't one.
+            Add a response to the state.
         """
-        if not f:
-            return None
-        if f.match(self._limit) and not f in self.view:
-            self.view.append(f)
+        self.flows._update(f)
         return f
+
+    def delete_flow(self, f):
+        self.flows._remove(f)
 
     def load_flows(self, flows):
-        self._flow_list.extend(flows)
-        self.recalculate_view()
+        self.flows._extend(flows)
 
     def set_limit(self, txt):
+        if txt == self.limit_txt:
+            return
         if txt:
             f = filt.parse(txt)
             if not f:
                 return "Invalid filter expression."
-            self._limit = f
+            self.view._close()
+            self.view = FlowView(self.flows, f)
         else:
-            self._limit = None
-        self.recalculate_view()
+            self.view._close()
+            self.view = FlowView(self.flows, None)
 
     def set_intercept(self, txt):
         if txt:
@@ -419,37 +571,25 @@ class State(object):
             if not f:
                 return "Invalid filter expression."
             self.intercept = f
-            self.intercept_txt = txt
         else:
             self.intercept = None
-            self.intercept_txt = None
 
-    def recalculate_view(self):
-        if self._limit:
-            self.view = [i for i in self._flow_list if i.match(self._limit)]
-        else:
-            self.view = self._flow_list[:]
-
-    def delete_flow(self, f):
-        self._flow_list.remove(f)
-        if f in self.view:
-            self.view.remove(f)
-        return True
+    @property
+    def intercept_txt(self):
+        return getattr(self.intercept, "pattern", None)
 
     def clear(self):
-        for i in self._flow_list[:]:
-            self.delete_flow(i)
+        self.flows._clear()
 
-    def accept_all(self):
-        for i in self._flow_list[:]:
-            i.accept_intercept()
+    def accept_all(self, master):
+        self.flows.accept_all(master)
 
     def revert(self, f):
         f.revert()
+        self.update_flow(f)
 
     def killall(self, master):
-        for i in self._flow_list:
-            i.kill(master)
+        self.flows.kill_all(master)
 
 
 class FlowMaster(controller.Master):
@@ -476,7 +616,6 @@ class FlowMaster(controller.Master):
         self.setheaders = SetHeaders()
         self.replay_ignore_params = False
         self.replay_ignore_content = None
-
 
         self.stream = None
         self.apps = AppRegistry()
@@ -573,14 +712,16 @@ class FlowMaster(controller.Master):
     def stop_client_playback(self):
         self.client_playback = None
 
-    def start_server_playback(self, flows, kill, headers, exit, nopop, ignore_params, ignore_content):
+    def start_server_playback(self, flows, kill, headers, exit, nopop, ignore_params, ignore_content,
+                              ignore_payload_params):
         """
             flows: List of flows.
             kill: Boolean, should we kill requests not part of the replay?
             ignore_params: list of parameters to ignore in server replay
             ignore_content: true if request content should be ignored in server replay
         """
-        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop, ignore_params, ignore_content)
+        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop, ignore_params, ignore_content,
+                                                   ignore_payload_params)
         self.kill_nonreplay = kill
 
     def stop_server_playback(self):
@@ -618,10 +759,35 @@ class FlowMaster(controller.Master):
                 self.shutdown()
             self.client_playback.tick(self)
 
-        return controller.Master.tick(self, q, timeout)
+        return super(FlowMaster, self).tick(q, timeout)
 
     def duplicate_flow(self, f):
         return self.load_flow(f.copy())
+
+    def create_request(self, method, scheme, host, port, path):
+        """
+            this method creates a new artificial and minimalist request also adds it to flowlist
+        """        
+        c = ClientConnection.from_state(dict(
+                address=dict(address=(host, port), use_ipv6=False),
+                clientcert=None
+            ))
+
+        s = ServerConnection.from_state(dict(
+                address=dict(address=(host, port), use_ipv6=False),
+                state=[],
+                source_address=None, #source_address=dict(address=(host, port), use_ipv6=False),
+                cert=None,
+                sni=host,
+                ssl_established=True
+            ))
+        f = http.HTTPFlow(c,s);
+        headers = ODictCaseless()
+        
+        req = http.HTTPRequest("absolute", method, scheme, host, port, path, (1, 1), headers, None,
+                                 None, None, None)
+        f.request = req
+        return self.load_flow(f)
 
     def load_flow(self, f):
         """
@@ -646,8 +812,20 @@ class FlowMaster(controller.Master):
         """
             Load flows from a FlowReader object.
         """
+        cnt = 0
         for i in fr.stream():
+            cnt += 1
             self.load_flow(i)
+        return cnt
+
+    def load_flows_file(self, path):
+        path = os.path.expanduser(path)
+        try:
+            f = file(path, "rb")
+            freader = FlowReader(f)
+        except IOError, v:
+            raise FlowReadError(v.strerror)
+        return self.load_flows(freader)
 
     def process_new_request(self, f):
         if self.stickycookie_state:
@@ -672,17 +850,18 @@ class FlowMaster(controller.Master):
         if self.stickycookie_state:
             self.stickycookie_state.handle_response(f)
 
-    def replay_request(self, f, block=False):
+    def replay_request(self, f, block=False, run_scripthooks=True):
         """
             Returns None if successful, or error message if not.
         """
-        if f.live:
-            return "Can't replay request which is still live..."
-        if f.intercepting:
+        if f.live and run_scripthooks:
+            return "Can't replay live request."
+        if f.intercepted:
             return "Can't replay while intercepting..."
         if f.request.content == http.CONTENT_MISSING:
             return "Can't replay request with missing content..."
         if f.request:
+            f.backup()
             f.request.is_replay = True
             if f.request.content:
                 f.request.headers["Content-Length"] = [str(len(f.request.content))]
@@ -692,7 +871,7 @@ class FlowMaster(controller.Master):
             rt = http.RequestReplayThread(
                 self.server.config,
                 f,
-                self.masterq,
+                self.masterq if run_scripthooks else False,
                 self.should_exit
             )
             rt.start()  # pragma: no cover
@@ -716,7 +895,7 @@ class FlowMaster(controller.Master):
         sc.reply()
 
     def handle_error(self, f):
-        self.state.add_error(f)
+        self.state.update_flow(f)
         self.run_script_hook("error", f)
         if self.client_playback:
             self.client_playback.clear(f)
@@ -733,10 +912,11 @@ class FlowMaster(controller.Master):
                     **{"mitmproxy.master": self}
                 )
                 if err:
-                    self.add_event("Error in wsgi app. %s"%err, "error")
+                    self.add_event("Error in wsgi app. %s" % err, "error")
                 f.reply(protocol.KILL)
                 return
-        self.state.add_request(f)
+        if f not in self.state.flows:  # don't add again on replay
+            self.state.add_flow(f)
         self.replacehooks.run(f)
         self.setheaders.run(f)
         self.run_script_hook("request", f)
@@ -757,7 +937,7 @@ class FlowMaster(controller.Master):
         return f
 
     def handle_response(self, f):
-        self.state.add_response(f)
+        self.state.update_flow(f)
         self.replacehooks.run(f)
         self.setheaders.run(f)
         self.run_script_hook("response", f)
@@ -768,11 +948,17 @@ class FlowMaster(controller.Master):
             self.stream.add(f)
         return f
 
+    def handle_intercept(self, f):
+        self.state.update_flow(f)
+
+    def handle_accept_intercept(self, f):
+        self.state.update_flow(f)
+
     def shutdown(self):
         self.unload_scripts()
         controller.Master.shutdown(self)
         if self.stream:
-            for i in self.state._flow_list:
+            for i in self.state.flows:
                 if not i.response:
                     self.stream.add(i)
             self.stop_stream()
@@ -783,6 +969,25 @@ class FlowMaster(controller.Master):
     def stop_stream(self):
         self.stream.fo.close()
         self.stream = None
+
+
+def read_flows_from_paths(paths):
+    """
+    Given a list of filepaths, read all flows and return a list of them.
+    From a performance perspective, streaming would be advisable -
+    however, if there's an error with one of the files, we want it to be raised immediately.
+
+    If an error occurs, a FlowReadError will be raised.
+    """
+    try:
+        flows = []
+        for path in paths:
+            path = os.path.expanduser(path)
+            with file(path, "rb") as f:
+                flows.extend(FlowReader(f).stream())
+    except IOError as e:
+        raise FlowReadError(e.strerror)
+    return flows
 
 
 class FlowWriter:
@@ -814,7 +1019,9 @@ class FlowReader:
                 data = tnetstring.load(self.fo)
                 if tuple(data["version"][:2]) != version.IVERSION[:2]:
                     v = ".".join(str(i) for i in data["version"])
-                    raise FlowReadError("Incompatible serialized data version: %s"%v)
+                    raise FlowReadError(
+                        "Incompatible serialized data version: %s" % v
+                    )
                 off = self.fo.tell()
                 yield handle.protocols[data["type"]]["flow"].from_state(data)
         except ValueError, v:

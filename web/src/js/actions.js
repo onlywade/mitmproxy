@@ -1,38 +1,120 @@
+var $ = require("jquery");
+
 var ActionTypes = {
-    //Settings
-    UPDATE_SETTINGS: "update_settings",
+    // Connection
+    CONNECTION_OPEN: "connection_open",
+    CONNECTION_CLOSE: "connection_close",
+    CONNECTION_ERROR: "connection_error",
 
-    //EventLog
-    ADD_EVENT: "add_event",
+    // Stores
+    SETTINGS_STORE: "settings",
+    EVENT_STORE: "events",
+    FLOW_STORE: "flows",
+};
 
-    //Flow
-    ADD_FLOW: "add_flow",
-    UPDATE_FLOW: "update_flow",
+var StoreCmds = {
+    ADD: "add",
+    UPDATE: "update",
+    REMOVE: "remove",
+    RESET: "reset"
+};
+
+var ConnectionActions = {
+    open: function () {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.CONNECTION_OPEN
+        });
+    },
+    close: function () {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.CONNECTION_CLOSE
+        });
+    },
+    error: function () {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.CONNECTION_ERROR
+        });
+    }
 };
 
 var SettingsActions = {
     update: function (settings) {
-        settings = _.merge({}, SettingsStore.getAll(), settings);
-        //TODO: Update server.
 
+        $.ajax({
+            type: "PUT",
+            url: "/settings",
+            data: settings
+        });
+
+        /*
         //Facebook Flux: We do an optimistic update on the client already.
         AppDispatcher.dispatchViewAction({
-            type: ActionTypes.UPDATE_SETTINGS,
-            settings: settings
+            type: ActionTypes.SETTINGS_STORE,
+            cmd: StoreCmds.UPDATE,
+            data: settings
+        });
+        */
+    }
+};
+
+var EventLogActions_event_id = 0;
+var EventLogActions = {
+    add_event: function (message) {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.EVENT_STORE,
+            cmd: StoreCmds.ADD,
+            data: {
+                message: message,
+                level: "web",
+                id: "viewAction-" + EventLogActions_event_id++
+            }
         });
     }
 };
 
-var event_id = 0;
-var EventLogActions = {
-    add_event: function(message){
-        AppDispatcher.dispatchViewAction({
-            type: ActionTypes.ADD_EVENT,
-            data: {
-                message: message,
-                level: "web",
-                id: "viewAction-"+event_id++
-            }
+var FlowActions = {
+    accept: function (flow) {
+        $.post("/flows/" + flow.id + "/accept");
+    },
+    accept_all: function(){
+        $.post("/flows/accept");
+    },
+    "delete": function(flow){
+        $.ajax({
+            type:"DELETE",
+            url: "/flows/" + flow.id
         });
+    },
+    duplicate: function(flow){
+        $.post("/flows/" + flow.id + "/duplicate");
+    },
+    replay: function(flow){
+        $.post("/flows/" + flow.id + "/replay");
+    },
+    revert: function(flow){
+        $.post("/flows/" + flow.id + "/revert");
+    },
+    update: function (flow) {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.FLOW_STORE,
+            cmd: StoreCmds.UPDATE,
+            data: flow
+        });
+    },
+    clear: function(){
+        $.post("/clear");
     }
+};
+
+Query = {
+    FILTER: "f",
+    HIGHLIGHT: "h",
+    SHOW_EVENTLOG: "e"
+};
+
+module.exports = {
+    ActionTypes: ActionTypes,
+    ConnectionActions: ConnectionActions,
+    FlowActions: FlowActions,
+    StoreCmds: StoreCmds
 };

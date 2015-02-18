@@ -1,4 +1,8 @@
-[![Build Status](https://travis-ci.org/mitmproxy/mitmproxy.png?branch=master)](https://travis-ci.org/mitmproxy/mitmproxy) [![Coverage Status](https://coveralls.io/repos/mitmproxy/mitmproxy/badge.png?branch=master)](https://coveralls.io/r/mitmproxy/mitmproxy)
+[![Build Status](https://travis-ci.org/mitmproxy/mitmproxy.svg?branch=master)](https://travis-ci.org/mitmproxy/mitmproxy) [![Coverage Status](https://coveralls.io/repos/mitmproxy/mitmproxy/badge.svg?branch=master)](https://coveralls.io/r/mitmproxy/mitmproxy)
+[![Latest Version](https://pypip.in/version/mitmproxy/badge.svg?style=flat)](https://pypi.python.org/pypi/mitmproxy/)
+[![Supported Python versions](https://pypip.in/py_versions/mitmproxy/badge.svg?style=flat)](https://pypi.python.org/pypi/mitmproxy)
+[![Supported Python implementations](https://pypip.in/implementation/mitmproxy/badge.svg?style=flat)](https://pypi.python.org/pypi/mitmproxy/)
+
 
 __mitmproxy__ is an interactive, SSL-capable man-in-the-middle proxy for HTTP
 with a console interface.
@@ -70,10 +74,9 @@ This installs the latest GitHub versions of mitmproxy, netlib and pathod into `m
 
 ### Testing
 
-The test suite requires the `dev` extra requirements listed in [setup.py](https://github.com/mitmproxy/mitmproxy/blob/master/setup.py) and [pathod](http://pathod.net), version matching mitmproxy. Install these with:
+The test suite requires the `dev` extra requirements listed in [setup.py](https://github.com/mitmproxy/mitmproxy/blob/master/setup.py). Install these with:
 
-`
-pip install "mitmproxy[dev]""`
+`pip install "mitmproxy[dev]"`
 
 
 Please ensure that all patches are accompanied by matching changes in the test
@@ -85,8 +88,3 @@ suite. The project maintains 100% test coverage.
 Rendering the documentation requires [countershape](http://github.com/cortesi/countershape). After installation, you can render the documentation to the doc like this:
 
 `cshape doc-src doc`
-
-
-
-
-
