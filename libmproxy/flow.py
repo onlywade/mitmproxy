@@ -851,7 +851,7 @@ class FlowMaster(controller.Master):
             pb = self.do_server_playback(f)
             if not pb:
                 if self.kill_nonreplay:
-                    f.kill(self)
+                    f.set_blank_response()
                 else:
                     f.reply()
 

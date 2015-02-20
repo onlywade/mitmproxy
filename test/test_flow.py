@@ -812,7 +812,8 @@ class TestFlowMaster:
         f = tutils.tflow()
         f.request.host = "nonexistent"
         fm.process_new_request(f)
-        assert "killed" in f.error.msg
+        assert f.response.code == 200
+        assert f.response.content == ''
 
     def test_stickycookie(self):
         s = flow.State()

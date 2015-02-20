@@ -953,6 +953,12 @@ class HTTPFlow(Flow):
             c += self.response.replace(pattern, repl, *args, **kwargs)
         return c
 
+    def set_blank_response(self):
+        blank_response = HTTPResponse([1, 1], 200, 'OK',
+            ODictCaseless([['Content-Type', 'text/html']]), '')
+        self.response = blank_response
+        self.reply(blank_response)
+
 
 class HttpAuthenticationError(Exception):
     def __init__(self, auth_headers=None):
