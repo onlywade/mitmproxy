@@ -50,6 +50,14 @@ class RegularProxyMode(ProxyMode):
         return None
 
 
+class DnsProxyMode(ProxyMode):
+    http_form_in = "relative"
+    http_form_out = "relative"
+
+    def get_upstream_server(self, client_conn):
+        return None
+
+
 class TransparentProxyMode(ProxyMode):
     http_form_in = "relative"
     http_form_out = "relative"

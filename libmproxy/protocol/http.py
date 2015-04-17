@@ -1342,6 +1342,16 @@ class HTTPHandler(ProtocolHandler):
                     self.c.set_server_address((request.host, request.port))
                     flow.server_conn = self.c.server_conn
 
+	    if request.form_in == "relative" and self.c.config.mode == "dns":
+		# get host from Headers
+		request.host = request.headers['Host'][0]
+		if request.scheme == "https":
+		    request.port = 443
+		else:
+		    request.port = 80
+		self.c.set_server_address((request.host, request.port))
+		flow.server_conn = self.c.server_conn
+
             return None
         raise http.HttpError(
             400, "Invalid HTTP request form (expected: %s, got: %s)" % (

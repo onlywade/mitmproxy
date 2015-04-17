@@ -4,7 +4,7 @@ import re
 from OpenSSL import SSL
 from netlib import http_auth, certutils, tcp
 from .. import utils, platform, version
-from .primitives import RegularProxyMode, TransparentProxyMode, UpstreamProxyMode, ReverseProxyMode, Socks5ProxyMode
+from .primitives import RegularProxyMode, TransparentProxyMode, UpstreamProxyMode, ReverseProxyMode, Socks5ProxyMode, DnsProxyMode
 
 TRANSPARENT_SSL_PORTS = [443, 8443]
 CONF_BASENAME = "mitmproxy"
@@ -64,6 +64,8 @@ class ProxyConfig:
 
         if mode == "transparent":
             self.mode = TransparentProxyMode(platform.resolver(), ssl_ports)
+	elif mode == "dns":
+            self.mode = DnsProxyMode()
         elif mode == "socks5":
             self.mode = Socks5ProxyMode(ssl_ports)
         elif mode == "reverse":
@@ -132,8 +134,11 @@ def process_proxy_options(parser, options):
         c += 1
         mode = "upstream"
         upstream_server = options.upstream_proxy
+    if options.dns_proxy:
+	c += 1
+        mode = "dns"
     if c > 1:
-        return parser.error("Transparent, SOCKS5, reverse and upstream proxy mode "
+        return parser.error("Transparent, SOCKS5, DNS, reverse and upstream proxy mode "
                             "are mutually exclusive.")
 
     if options.clientcerts:

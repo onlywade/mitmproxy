@@ -364,6 +364,11 @@ def common_options(parser):
         help="Set transparent proxy mode."
     )
     group.add_argument(
+        "-D", "--dns",
+        action="store_true", dest="dns_proxy", default=False,
+        help="Set transparent proxy mode based on DNS spoofing."
+    )
+    group.add_argument(
         "-U", "--upstream",
         action="store",
         type=parse_server_spec,
