@@ -1027,7 +1027,7 @@ class HTTPFlow(Flow):
 
     def set_blank_response(self):
         blank_response = HTTPResponse([1, 1], 200, 'OK',
-            ODictCaseless([['Content-Type', 'text/html']]), '')
+            odict.ODictCaseless([['Content-Type', 'text/html']]), '')
         self.response = blank_response
         self.reply(blank_response)
 
