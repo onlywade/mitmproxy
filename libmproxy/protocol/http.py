@@ -354,6 +354,8 @@ class HTTPRequest(HTTPMessage):
             rfile.reset_timestamps()
 
         request_line = get_line(rfile)
+        print("********* request line ********")
+        print(request_line)
 
         if hasattr(rfile, "first_byte_timestamp"):
             # more accurate timestamp_start
@@ -1350,8 +1352,10 @@ class HTTPHandler(ProtocolHandler):
 
             return None
 
+        self.c.log("Request: %s" % request, "info")
         self.c.log("Request host: %s" % request.host, "info")
         self.c.log("Request path: %s" % request.path, "info")
+        self.c.log("Request form: %s" % request.form_in, "info")
         raise http.HttpError(
             400, "Invalid HTTP request form (expected: %s, got: %s)" % (
                 self.expected_form_in, request.form_in
