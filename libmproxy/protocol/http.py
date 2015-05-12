@@ -1349,6 +1349,9 @@ class HTTPHandler(ProtocolHandler):
                     flow.server_conn = self.c.server_conn
 
             return None
+
+        self.c.log("Request host: %s" % request.host, "info")
+        self.c.log("Request path: %s" % request.path, "info")
         raise http.HttpError(
             400, "Invalid HTTP request form (expected: %s, got: %s)" % (
                 self.expected_form_in, request.form_in
